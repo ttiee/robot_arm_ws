@@ -15,15 +15,27 @@ import pickle
 import os
 from copy import deepcopy
 import hashlib
+import rospkg
 
 tau = 2 * math.pi
 
 class TrajectoryCache:
     """轨迹缓存管理类"""
-    def __init__(self, cache_dir="trajectory_cache"):
+    def __init__(self, cache_dir=None):
+        if cache_dir is None:
+            # 获取robot_arm包的路径
+            rospack = rospkg.RosPack()
+            try:
+                package_path = rospack.get_path('robot_arm')
+                cache_dir = os.path.join(package_path, 'trajectory_cache')
+            except rospkg.ResourceNotFound:
+                # 如果找不到包，使用默认路径
+                cache_dir = "trajectory_cache"
+        
         self.cache_dir = cache_dir
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
+        print(f"轨迹缓存目录: {self.cache_dir}")
     
     def _get_cache_key(self, start_pose, end_pose, grasp_type="pick"):
         """根据起始和结束位置生成缓存键"""
@@ -68,6 +80,37 @@ class TrajectoryCache:
             if file.endswith('.pkl'):
                 os.remove(os.path.join(self.cache_dir, file))
         print("轨迹缓存已清空")
+    
+    def save_named_target_trajectory(self, trajectory, target_name):
+        """保存命名目标的轨迹"""
+        cache_key = f"named_target_{target_name}"
+        cache_file = os.path.join(self.cache_dir, f"{cache_key}.pkl")
+        
+        try:
+            with open(cache_file, 'wb') as f:
+                pickle.dump(trajectory, f)
+            print(f"命名目标轨迹已保存: {target_name}")
+            return True
+        except Exception as e:
+            print(f"保存命名目标轨迹失败: {e}")
+            return False
+    
+    def load_named_target_trajectory(self, target_name):
+        """加载命名目标的轨迹"""
+        cache_key = f"named_target_{target_name}"
+        cache_file = os.path.join(self.cache_dir, f"{cache_key}.pkl")
+        
+        if not os.path.exists(cache_file):
+            return None
+        
+        try:
+            with open(cache_file, 'rb') as f:
+                trajectory = pickle.load(f)
+            print(f"命名目标轨迹已加载: {target_name}")
+            return trajectory
+        except Exception as e:
+            print(f"加载命名目标轨迹失败: {e}")
+            return None
 
 
 def open_gripper(posture):
@@ -179,14 +222,6 @@ def test_moveit_planning(group):
 
 
 def execute_cached_trajectory(group, trajectory):
-    """执行缓存的轨迹"""
-    try:
-        success = group.execute(trajectory, wait=True)
-        group.stop()
-        return success
-    except Exception as e:
-        print(f"执行轨迹失败: {e}")
-        return False
     """执行缓存的轨迹"""
     try:
         success = group.execute(trajectory, wait=True)
@@ -365,6 +400,93 @@ def create_multiple_place_locations(x, y, z):
     return locations
 
 
+def move_to_ready_with_cache(group, cache):
+    """使用缓存移动到ready位置"""
+    # 尝试加载缓存的ready轨迹
+    cached_trajectory = cache.load_named_target_trajectory("ready")
+    if cached_trajectory:
+        print("使用缓存的ready轨迹")
+        success = execute_cached_trajectory(group, cached_trajectory)
+        if success:
+            return True
+    
+    # 如果没有缓存或执行失败，使用原始方法并保存轨迹
+    print("规划新的ready轨迹")
+    group.set_named_target("ready")
+    
+    try:
+        plan_result = group.plan()
+        
+        if isinstance(plan_result, tuple):
+            success, trajectory, planning_time, error_code = plan_result
+            if success and trajectory:
+                print(f"ready轨迹规划成功，用时: {planning_time:.2f}s")
+                # 执行并保存轨迹
+                if group.execute(trajectory, wait=True):
+                    group.stop()
+                    cache.save_named_target_trajectory(trajectory, "ready")
+                    return True
+        elif hasattr(plan_result, 'joint_trajectory') and len(plan_result.joint_trajectory.points) > 0:
+            if group.execute(plan_result, wait=True):
+                group.stop()
+                cache.save_named_target_trajectory(plan_result, "ready")
+                return True
+    except Exception as e:
+        print(f"ready轨迹规划/执行失败: {e}")
+    
+    # 最后尝试直接移动
+    return group.go(wait=True)
+
+
+def plan_direct_trajectory(group, cache, start_pos_str, target_pos, trajectory_type="direct"):
+    """规划从当前位置到目标位置的直接轨迹"""
+    target_pos_str = pose_to_string(target_pos)
+    
+    # 尝试加载缓存
+    cached_trajectory = cache.load_trajectory(start_pos_str, target_pos_str, trajectory_type)
+    if cached_trajectory:
+        print(f"使用缓存的{trajectory_type}轨迹")
+        return cached_trajectory
+    
+    # 规划新轨迹
+    print(f"规划新的{trajectory_type}轨迹")
+    target_pose = geometry_msgs.msg.Pose()
+    target_pose.position.x = target_pos[0]
+    target_pose.position.y = target_pos[1]
+    target_pose.position.z = target_pos[2]
+    target_pose.orientation.x = 1.0
+    target_pose.orientation.y = 0.0
+    target_pose.orientation.z = 0.0
+    target_pose.orientation.w = 0.0
+    
+    group.set_pose_target(target_pose)
+    
+    try:
+        plan_result = group.plan()
+        
+        if isinstance(plan_result, tuple):
+            success, trajectory, planning_time, error_code = plan_result
+            if success and trajectory:
+                print(f"规划成功，用时: {planning_time:.2f}s")
+                cache.save_trajectory(trajectory, start_pos_str, target_pos_str, trajectory_type)
+                return trajectory
+        elif hasattr(plan_result, 'joint_trajectory') and len(plan_result.joint_trajectory.points) > 0:
+            print(f"规划成功")
+            cache.save_trajectory(plan_result, start_pos_str, target_pos_str, trajectory_type)
+            return plan_result
+        elif isinstance(plan_result, list) and len(plan_result) > 0:
+            print(f"规划成功")
+            cache.save_trajectory(plan_result, start_pos_str, target_pos_str, trajectory_type)
+            return plan_result
+            
+        print(f"规划{trajectory_type}轨迹失败")
+        return None
+        
+    except Exception as e:
+        print(f"规划过程出错: {e}")
+        return None
+
+
 def pick_object_with_cache(group, scene, cache, object_name, x, y, z):
     """使用缓存的抓取功能"""
     print(f"正在尝试抓取 {object_name}...")
@@ -377,7 +499,7 @@ def pick_object_with_cache(group, scene, cache, object_name, x, y, z):
         success = execute_cached_trajectory(group, trajectory)
         if success:
             print(f"成功移动到抓取位置")
-            # 然后执行实际的抓取动作
+            # 减少延时，立即执行抓取动作
             grasps = create_multiple_grasps(x, y, z, object_name)
             result = group.pick(object_name, grasps)
             if result == 1:
@@ -394,7 +516,7 @@ def pick_object_with_cache(group, scene, cache, object_name, x, y, z):
             print(f"成功抓取 {object_name}")
             return True
         print(f"抓取失败，错误代码: {result}。正在重试...")
-        rospy.sleep(1)
+        rospy.sleep(0.5)  # 减少重试延时
         
     print(f"抓取 {object_name} 失败")
     scene.remove_world_object(object_name)
@@ -413,7 +535,7 @@ def place_object_with_cache(group, scene, cache, object_name, x, y, z):
         success = execute_cached_trajectory(group, trajectory)
         if success:
             print(f"成功移动到放置位置")
-            # 然后执行实际的放置动作
+            # 减少延时，立即执行放置动作
             place_locations = create_multiple_place_locations(x, y, z)
             result = group.place(object_name, place_locations)
             if result == 1:
@@ -430,7 +552,7 @@ def place_object_with_cache(group, scene, cache, object_name, x, y, z):
             print(f"成功放置 {object_name}")
             return True
         print(f"放置失败，错误代码: {result}。重试中...")
-        rospy.sleep(1)
+        rospy.sleep(0.5)  # 减少重试延时
 
     print(f"放置 {object_name} 失败")
     scene.remove_attached_object(group.get_end_effector_link(), name=object_name)
@@ -439,7 +561,7 @@ def place_object_with_cache(group, scene, cache, object_name, x, y, z):
 
 
 def move_objects_to_table_with_cache(group, scene, cache, objects_info):
-    """使用缓存的物体搬运功能"""
+    """使用缓存的物体搬运功能（优化版）"""
     successful_moves = 0
     sorted_objects = sorted(
         objects_info.keys(),
@@ -447,34 +569,62 @@ def move_objects_to_table_with_cache(group, scene, cache, objects_info):
         reverse=True
     )
 
-    for object_name in sorted_objects:
+    for i, object_name in enumerate(sorted_objects):
         info = objects_info[object_name]
         ground_pos = info['ground_pos']
         table_pos = info['table_pos']
         
         print("\n" + "="*30)
-        print(f"开始处理物体: {object_name}")
+        print(f"开始处理物体: {object_name} ({i+1}/{len(sorted_objects)})")
         print("="*30)
         
-        print("移动到 'ready' 准备姿态...")
-        group.set_named_target("ready")
-        group.go(wait=True)
-        rospy.sleep(1)
+        # 只在第一个物体时移动到ready位置
+        if i == 0:
+            print("移动到 'ready' 准备姿态...")
+            success = move_to_ready_with_cache(group, cache)
+            if not success:
+                print("移动到ready位置失败，继续尝试...")
+            rospy.sleep(0.5)  # 减少延时
 
         if pick_object_with_cache(group, scene, cache, object_name, ground_pos[0], ground_pos[1], ground_pos[2]):
-            rospy.sleep(1)
-            print("抓取成功，移动到中间航点...")
-            group.set_named_target("ready")
-            group.go(wait=True)
-            rospy.sleep(1)
-            if place_object_with_cache(group, scene, cache, object_name, table_pos[0], table_pos[1], table_pos[2]):
-                successful_moves += 1
-                rospy.sleep(1)
+            print("抓取成功，准备放置...")
+            
+            # 尝试直接从抓取位置到放置位置
+            current_pose = group.get_current_pose().pose
+            current_pos_str = pose_to_string(current_pose)
+            
+            # 尝试直接轨迹到放置位置
+            direct_trajectory = plan_direct_trajectory(
+                group, cache, current_pos_str, 
+                [table_pos[0], table_pos[1], table_pos[2] + 0.1], 
+                "pick_to_place"
+            )
+            
+            if direct_trajectory:
+                print("使用直接轨迹到放置位置...")
+                if execute_cached_trajectory(group, direct_trajectory):
+                    if place_object_with_cache(group, scene, cache, object_name, table_pos[0], table_pos[1], table_pos[2]):
+                        successful_moves += 1
+                    else:
+                        print(f"未能放置 {object_name}")
+                else:
+                    print("直接轨迹执行失败，使用ready中间点...")
+                    success = move_to_ready_with_cache(group, cache)
+                    rospy.sleep(0.5)
+                    if place_object_with_cache(group, scene, cache, object_name, table_pos[0], table_pos[1], table_pos[2]):
+                        successful_moves += 1
             else:
-                print(f"未能放置 {object_name}，继续下一个物体。")
+                print("无法规划直接轨迹，使用ready中间点...")
+                success = move_to_ready_with_cache(group, cache)
+                rospy.sleep(0.5)
+                if place_object_with_cache(group, scene, cache, object_name, table_pos[0], table_pos[1], table_pos[2]):
+                    successful_moves += 1
+                else:
+                    print(f"未能放置 {object_name}")
         else:
             print(f"未能抓取 {object_name}，跳过该物体。")
-        rospy.sleep(2)
+        
+        rospy.sleep(1)  # 减少物体间的延时
 
     print("\n" + "="*30)
     print(f"搬运完成！成功搬运了 {successful_moves}/{len(objects_info)} 个物体")
@@ -483,13 +633,13 @@ def move_objects_to_table_with_cache(group, scene, cache, objects_info):
 
 
 def main():
-    print("初始化Panda机器人多物体搬运仿真（带轨迹缓存）...")
+    print("初始化Panda机器人多物体搬运仿真（带轨迹缓存优化版）...")
     moveit_commander.roscpp_initialize(sys.argv)
     rospy.init_node("panda_multi_pick_place_cached", anonymous=True)
     scene = PlanningSceneInterface()
     group = MoveGroupCommander("panda_arm")
     
-    # 初始化轨迹缓存
+    # 初始化轨迹缓存（使用robot_arm包路径）
     cache = TrajectoryCache()
     
     group.set_planning_time(30.0) 
@@ -502,17 +652,20 @@ def main():
 
     # 测试MoveIt规划功能
     print("移动到ready位置...")
-    group.set_named_target("ready")
-    group.go(wait=True)
-    rospy.sleep(2)
+    success = move_to_ready_with_cache(group, cache)
+    if not success:
+        print("移动到ready位置失败，使用备用方法...")
+        group.set_named_target("ready")
+        group.go(wait=True)
+    rospy.sleep(1)  # 减少延时
     
     # 测试轨迹规划
-    test_result = test_moveit_planning(group)
-    if test_result:
-        print("✅ MoveIt规划测试成功！")
-    else:
-        print("❌ MoveIt规划测试失败，可能需要调整规划参数")
-        print("继续使用原始抓取方法...")
+    # test_result = test_moveit_planning(group)
+    # if test_result:
+    #     print("✅ MoveIt规划测试成功！")
+    # else:
+    #     print("❌ MoveIt规划测试失败，可能需要调整规划参数")
+    #     print("继续使用原始抓取方法...")
 
     objects_info = {
         "object_0_0": {"ground_pos": [0.45, -0.15, 0.025], "table_pos": [-0.08, 0.48, 0.425]},
@@ -538,8 +691,7 @@ def main():
     successful_count = move_objects_to_table_with_cache(group, scene, cache, objects_info)
 
     print("所有任务完成，返回初始位置...")
-    group.set_named_target("ready")
-    group.go(wait=True)
+    move_to_ready_with_cache(group, cache)
     
     print(f"最终成功率: {successful_count}/{len(objects_info)}")
     print("\n轨迹缓存统计:")

@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<robot name="block" xmlns:xacro="http://ros.org/wiki/xacro">
+  <link name="block_link">
+    <visual>
+      <geometry>
+        <box size="0.04 0.04 0.05"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0 0.5 1 1"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.04 0.04 0.05"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.2"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.0001" ixy="0.0" ixz="0.0" iyy="0.0001" iyz="0.0" izz="0.0001"/>
+    </inertial>
+  </link>
+</robot>

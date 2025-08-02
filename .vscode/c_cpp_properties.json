@@ -1,0 +1,29 @@
+{
+  "configurations": [
+    {
+      "browse": {
+        "databaseFilename": "${default}",
+        "limitSymbolsToIncludedHeaders": false
+      },
+      "includePath": [
+        "/home/shrenqi/workspace/devel/include/**",
+        "/opt/ros/noetic/include/**",
+        "/home/shrenqi/workspace/src/plumbing/include/**",
+        "/home/shrenqi/workspace/src/publish/include/**",
+        "/home/shrenqi/workspace/src/ros1/include/**",
+        "/home/shrenqi/workspace/src/test_action/include/**",
+        "/home/shrenqi/workspace/src/tf2_test/include/**",
+        "/home/shrenqi/workspace/src/try_publish/include/**",
+        "/home/shrenqi/catkin_ws/src/universal_robot/ur_kinematics/include/**",
+        "/home/shrenqi/workspace/src/urdf_test01/include/**",
+        "/usr/include/**"
+      ],
+      "name": "ROS",
+      "intelliSenseMode": "gcc-x64",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "gnu11",
+      "cppStandard": "c++14"
+    }
+  ],
+  "version": 4
+}

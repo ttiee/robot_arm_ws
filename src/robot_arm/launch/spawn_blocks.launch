@@ -1,0 +1,44 @@
+<launch>
+    <!-- 必须先启动 Gazebo！ -->
+    <!-- <include file="$(find franka_gazebo)/launch/panda.launch" pass_all_args="true" /> -->
+  
+    <!-- 批量生成 2x2 或 4x4 方块（以 2x2 为例）-->
+    <node pkg="gazebo_ros" type="spawn_model" name="spawn_block_0_0" args="-param block_urdf -urdf -model object_0_0 -x 0.35 -y -0.15 -z 0.025" />
+    <node pkg="gazebo_ros" type="spawn_model" name="spawn_block_0_1" args="-param block_urdf -urdf -model object_0_1 -x 0.35 -y -0.05 -z 0.025" />
+    <node pkg="gazebo_ros" type="spawn_model" name="spawn_block_1_0" args="-param block_urdf -urdf -model object_1_0 -x 0.45 -y -0.15 -z 0.025" />
+    <node pkg="gazebo_ros" type="spawn_model" name="spawn_block_1_1" args="-param block_urdf -urdf -model object_1_1 -x 0.45 -y -0.05 -z 0.025" />
+  
+    <!-- 你可以扩展到 4x4，只需照这个写法循环写16个即可 -->
+  
+    <!-- block_urdf 参数由以下文件提供 -->
+    <param name="block_urdf" command="$(find xacro)/xacro '$(find robot_arm)/urdf/block.urdf.xacro'" />
+
+
+  <!-- MoveIt options -->
+  <arg name="pipeline" default="ompl" doc="Planning pipeline to use with MoveIt"/>
+
+  <!-- Panda options -->
+  <arg name="load_gripper" default="true" />
+  <arg name="transmission" default="effort" />
+
+  <!-- Gazebo options -->
+  <arg name="gazebo_gui" default="true" doc="Start Gazebo GUI"/>
+  <arg name="paused" default="false" doc="Start Gazebo paused"/>
+
+  <!-- Launch the gazebo simulator and spawn the robot -->
+  <include file="$(find franka_gazebo)/launch/panda.launch" pass_all_args="true">
+    <arg name="headless" value="$(eval not arg('gazebo_gui'))" />
+    <arg name="use_gripper" default="$(arg load_gripper)" />
+    <arg name="controller" default="$(arg transmission)_joint_trajectory_controller" />
+  </include>
+
+    <!-- Launch MoveIt -->
+  <include file="$(find panda_moveit_config)/launch/demo.launch" pass_all_args="true">
+    <!-- robot_description is loaded by gazebo.launch, to enable Gazebo features -->
+    <arg name="load_robot_description" value="false" />
+    <!-- MoveItSimpleControllerManager provides ros_control's JointTrajectory controllers
+         as well as GripperCommand actions -->
+    <arg name="moveit_controller_manager" value="simple" />
+  </include>
+  </launch>
+  

@@ -55,15 +55,15 @@ class CoordinateSystem:
         }
 
     def create_pose(self, position, orientation=None):
-        """创建标准的Pose消息（修复方向，去除45度旋转）"""
+        """创建标准的Pose消息（修复夹爪方向）"""
         pose = geometry_msgs.msg.Pose()
         pose.position.x = position[0]
         pose.position.y = position[1] 
         pose.position.z = position[2]
         
         if orientation is None:
-            # 使用原始脚本的正确方向：绕X轴旋转180度（垂直向下），无Z轴旋转
-            quat = tf.quaternion_from_euler(math.pi, 0, 0)  # 移除math.pi/4旋转
+            # 使用正确的夹爪方向：绕X轴旋转180度（垂直向下），绕Z轴旋转-45度使夹爪对准方块边缘
+            quat = tf.quaternion_from_euler(math.pi, 0, - math.pi/4)  # 添加-45度Z轴旋转
         else:
             quat = orientation
             

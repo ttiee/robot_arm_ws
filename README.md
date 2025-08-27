@@ -6,10 +6,10 @@
 
 ### 当前实现的功能
 
-  * [cite\_start]启动一个包含 Panda 机械臂和几个小物块的 Gazebo 仿真世界。 [cite: 1, 11]
-  * [cite\_start]加载 MoveIt\!，用于机械臂的运动规划，并通过 RViz 进行可视化。 [cite: 1, 11]
-  * 提供一个 Python 脚本 (`pick.py`)，该脚本定义了连接 MoveIt\!、添加场景物体、以及规划“抓取”和“放置”动作的逻辑。
-  * 运行脚本后，可以在 RViz 中观察到机械臂模型按照预定逻辑执行了抓取和放置的 **规划动画**。
+  * 启动一个包含 Panda 机械臂和多个小物块的 Gazebo 仿真世界。
+  * 加载 MoveIt\! 进行机械臂运动规划，并在 RViz 中可视化规划结果。
+  * 提供 Python 脚本 (`pick.py`)，定义连接 MoveIt\!、添加场景物体以及规划“抓取”和“放置”动作的逻辑。
+  * 运行脚本后，可以在 RViz 中观察到机械臂模型按照预定逻辑执行抓取和放置的 **规划动画**。
 
 ### 复现步骤
 
@@ -92,7 +92,9 @@ robot_arm/
 │   ├── spawn_blocks.launch   # 主启动文件，负责启动所有节点
 │   └── panda_gazebo.launch   # 启动多个panda的示例文件
 ├── scripts/
-│   └── pick.py               # 核心规划逻辑脚本
+│   ├── pick.py               # RViz 中演示抓取与放置的核心脚本
+│   └── pick_gezebo.py        # 面向 Gazebo 控制的实验脚本
+├── joint_trajectory_cache/   # 预存的关节轨迹数据，加速脚本执行
 ├── urdf/
 │   └── block.urdf.xacro      # 方块的模型文件
 ├── CMakeLists.txt
@@ -105,4 +107,5 @@ robot_arm/
 
 1.  **配置夹爪控制器**：需要为 Panda 的夹爪配置 `gazebo_ros_control`，并确保夹爪的 effort/position controller 能够正确加载。
 2.  **连接脚本与控制器**：修改 `pick.py` 中 `open_gripper` 和 `closed_gripper` 函数，使其不再是生成轨迹消息，而是向夹爪的控制器发布实际的控制指令（例如 `std_msgs/Float64MultiArray` 或 `control_msgs/GripperCommand`）。
-3.  **Gazebo 抓取插件**：一种更可靠的方法是使用或编写一个 Gazebo 插件，该插件可以在夹爪闭合并接触到物体时，动态地创建一个 "fixed" 关节，将物体“吸附”到夹爪上，在放置时再解除该关节。
+3.  **Gazebo 抓取插件**：一种更可靠的方法是使用或编写一个 Gazebo 插件，该插件可以在夹爪闭合并接触到物体时，
+    动态创建一个 "fixed" 关节，将物体“吸附”到夹爪上，在放置时再解除该关节。

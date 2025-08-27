@@ -2,7 +2,7 @@
 
 ## 1. 项目简介
 
-该项目演示了如何使用 MoveIt! 控制 Panda 机械臂在仿真环境中执行复杂的多物体抓取和放置任务。机械臂会从地面上抓取四个小物块，并将它们逐一放置到旁边的桌子上。
+该项目演示了如何使用 MoveIt! 控制 Panda 机械臂在仿真环境中执行复杂的多物体抓取和放置任务。机械臂会从地面上抓取四个小物块，并将它们逐一放置到旁边的桌子上。当前实现仅在 RViz 中执行运动规划，Gazebo 里的夹爪尚未真正抓取物体。
 
 ## 2. 功能特点
 
@@ -25,12 +25,12 @@
 
 请按照以下步骤在两个独立的终端中运行仿真和控制脚本。
 
-### 4.1. 终端 A：启动 MoveIt! 仿真环境
+### 4.1. 终端 A：启动仿真环境
 
-首先，启动包含 Panda 机械臂和 MoveIt! 配置的 Rviz 仿真环境。
+使用本包提供的 `spawn_blocks.launch` 文件来启动 Gazebo 世界、加载机器人并启动 MoveIt!，同时在 RViz 中进行可视化。
 
 ```bash
-roslaunch panda_moveit_config demo.launch
+roslaunch robot_arm spawn_blocks.launch
 ```
 
 ### 4.2. 终端 B：运行抓取和放置脚本
@@ -40,3 +40,5 @@ roslaunch panda_moveit_config demo.launch
 ```bash
 rosrun robot_arm pick.py
 ```
+
+> 提示：`joint_trajectory_cache` 目录中预存了一些常用的关节位置，可用于加速脚本初始化。

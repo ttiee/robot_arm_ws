@@ -8,17 +8,176 @@ import geometry_msgs.msg
 import tf.transformations as tf
 from moveit_commander import MoveGroupCommander, PlanningSceneInterface
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from moveit_msgs.msg import Grasp, PlaceLocation, RobotTrajectory
 import time
 import math
 import pickle
 import os
-from copy import deepcopy
-import hashlib
 import rospkg
 import numpy as np
 
-tau = 2 * math.pi
+class CoordinateSystem:
+    """统一的坐标系管理类（新增参数化网格生成，恢复原始布局坐标）"""
+    def __init__(self, base_frame="panda_link0",
+                 rows=2, cols=2,
+                 ground_origin=(0.45, -0.15, 0.025), ground_dx=0.10, ground_dy=0.10,
+                 table_origin=(-0.08, 0.48), table_dx=0.12, table_dy=0.12,
+                 object_size=(0.04, 0.04, 0.06),
+                 place_z_mode='legacy'  # 'legacy' -> 0.40 兼容旧代码, 'flush' -> 桌面+物体半高 0.43
+                 ):
+        self.base_frame = base_frame
+        # 工作空间
+        self.workspace = {
+            'x_range': [0.2, 0.8],
+            'y_range': [-0.6, 0.6],
+            'z_range': [0.0, 0.5],
+        }
+        # 关键高度
+        self.key_positions = {
+            'ground_level': ground_origin[2],
+            'table_surface': 0.4,
+            'approach_offset': 0.15,
+            'safe_height': 0.3,
+        }
+        # 场景固定物体
+        self.scene_objects = {
+            'table': {
+                'position': [0.0, 0.5, 0.2],
+                'size': [0.6, 0.4, 0.4],
+                'description': '目标桌子'
+            },
+            'ground': {
+                'position': [0.0, 0.0, -0.05],
+                'size': [2.0, 2.0, 0.1],
+                'description': '地面'
+            }
+        }
+        # 网格/物体参数
+        self.rows = rows
+        self.cols = cols
+        self.ground_origin = ground_origin
+        self.ground_dx = ground_dx
+        self.ground_dy = ground_dy
+        self.table_origin = table_origin
+        self.table_dx = table_dx
+        self.table_dy = table_dy
+        self.object_size = object_size
+        self.place_z_mode = place_z_mode  # legacy / flush
+
+        # 根据模式计算桌面放置中心Z
+        if place_z_mode == 'flush':
+            # 桌面表面 + 物体半高 = 0.4 + 0.03 = 0.43
+            self.table_center_z = self.key_positions['table_surface'] + self.object_size[2] / 2.0
+        else:
+            # 旧代码使用的中心高度（兼容）
+            self.table_center_z = self.key_positions['table_surface']
+
+        # 构建 objects_config
+        self.rebuild_objects_config()
+
+    def rebuild_objects_config(self):
+        """根据参数化网格重建 objects_config"""
+        objs = {}
+        for r in range(self.rows):
+            for c in range(self.cols):
+                name = f"object_{r}_{c}"
+                # 地面位置
+                gx = self.ground_origin[0] + c * self.ground_dx
+                gy = self.ground_origin[1] + r * self.ground_dy
+                gz = self.ground_origin[2]
+                # 桌面放置位置（中心）
+                tx = self.table_origin[0] + c * self.table_dx
+                ty = self.table_origin[1] + r * self.table_dy
+                tz = self.table_center_z
+                objs[name] = {
+                    "ground_pos": [round(gx, 4), round(gy, 4), round(gz, 4)],
+                    "table_pos": [round(tx, 4), round(ty, 4), round(tz, 4)],
+                    "size": list(self.object_size)
+                }
+        self.objects_config = objs
+
+    def create_pose(self, position, orientation=None):
+        """创建标准的Pose消息"""
+        pose = geometry_msgs.msg.Pose()
+        pose.position.x = position[0]
+        pose.position.y = position[1] 
+        pose.position.z = position[2]
+        
+        if orientation is None:
+            # 默认：末端执行器垂直向下，Z轴旋转45度
+            quat = tf.quaternion_from_euler(math.pi, 0, math.pi/4)
+        else:
+            quat = orientation
+            
+        pose.orientation = geometry_msgs.msg.Quaternion(*quat)
+        return pose
+    
+    def create_pose_stamped(self, position, orientation=None):
+        """创建带时间戳的Pose消息"""
+        pose_stamped = geometry_msgs.msg.PoseStamped()
+        pose_stamped.header.frame_id = self.base_frame
+        pose_stamped.pose = self.create_pose(position, orientation)
+        return pose_stamped
+    
+    def get_approach_pose(self, target_position):
+        """获取接近位置"""
+        approach_pos = [
+            target_position[0],
+            target_position[1],
+            target_position[2] + self.key_positions['approach_offset']
+        ]
+        return self.create_pose(approach_pos)
+    
+    def get_grasp_pose(self, target_position):
+        """获取抓取位置"""
+        grasp_pos = [
+            target_position[0],
+            target_position[1], 
+            target_position[2] + 0.1  # 稍微高于物体
+        ]
+        return self.create_pose(grasp_pos)
+    
+    def get_retreat_pose(self, target_position):
+        """获取撤退位置"""
+        retreat_pos = [
+            target_position[0],
+            target_position[1],
+            target_position[2] + self.key_positions['safe_height']
+        ]
+        return self.create_pose(retreat_pos)
+    
+    def validate_position(self, position):
+        """验证位置是否在工作空间内"""
+        x, y, z = position
+        ws = self.workspace
+        
+        if not (ws['x_range'][0] <= x <= ws['x_range'][1]):
+            return False, f"X坐标 {x} 超出范围 {ws['x_range']}"
+        if not (ws['y_range'][0] <= y <= ws['y_range'][1]):
+            return False, f"Y坐标 {y} 超出范围 {ws['y_range']}"
+        if not (ws['z_range'][0] <= z <= ws['z_range'][1]):
+            return False, f"Z坐标 {z} 超出范围 {ws['z_range']}"
+            
+        return True, "位置有效"
+    
+    def print_coordinates_info(self):
+        """打印坐标系统信息（补充网格公式与模式说明）"""
+        print("\n" + "="*50)
+        print("坐标系统信息")
+        print("="*50)
+        print(f"基座坐标系: {self.base_frame}")
+        print(f"工作空间: X{self.workspace['x_range']} Y{self.workspace['y_range']} Z{self.workspace['z_range']}")
+        print(f"物体尺寸: {self.object_size}")
+        print(f"地面网格: origin{self.ground_origin[:2]} dx={self.ground_dx} dy={self.ground_dy} rows={self.rows} cols={self.cols}")
+        print(f"桌面网格: origin{self.table_origin} dx={self.table_dx} dy={self.table_dy} rows={self.rows} cols={self.cols}")
+        print(f"放置Z模式: {self.place_z_mode} (table_center_z={self.table_center_z})")
+        print("\n物体配置 (ground -> table):")
+        for name, cfg in self.objects_config.items():
+            print(f"  {name}: {cfg['ground_pos']} -> {cfg['table_pos']}")
+        print("\n关键高度:")
+        for k, v in self.key_positions.items():
+            print(f"  {k}: {v}")
+        print("="*50 + "\n")
+
 
 class JointTrajectoryCache:
     """关节空间轨迹缓存管理类"""
@@ -34,18 +193,8 @@ class JointTrajectoryCache:
         self.cache_dir = cache_dir
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
-        print(f"关节轨迹缓存目录: {self.cache_dir}")
         
-        # 预定义的关节位置缓存
         self.joint_positions_cache = {}
-    
-    def _get_cache_key(self, target_name, pose_data=None):
-        """生成缓存键"""
-        if pose_data:
-            key_str = f"{target_name}_{str(pose_data)}"
-        else:
-            key_str = target_name
-        return hashlib.md5(key_str.encode()).hexdigest()
     
     def save_joint_values(self, joint_values, name):
         """保存关节值"""
@@ -54,7 +203,6 @@ class JointTrajectoryCache:
         try:
             with open(cache_file, 'wb') as f:
                 pickle.dump(joint_values, f)
-            print(f"关节位置已保存: {name}")
             return True
         except Exception as e:
             print(f"保存关节位置失败: {e}")
@@ -62,7 +210,6 @@ class JointTrajectoryCache:
     
     def load_joint_values(self, name):
         """加载关节值"""
-        # 首先检查内存缓存
         if name in self.joint_positions_cache:
             return self.joint_positions_cache[name]
         
@@ -74,7 +221,6 @@ class JointTrajectoryCache:
             with open(cache_file, 'rb') as f:
                 joint_values = pickle.load(f)
             self.joint_positions_cache[name] = joint_values
-            print(f"关节位置已加载: {name}")
             return joint_values
         except Exception as e:
             print(f"加载关节位置失败: {e}")
@@ -83,17 +229,17 @@ class JointTrajectoryCache:
 
 class PTPController:
     """点到点（PTP）控制器"""
-    def __init__(self, group, cache):
+    def __init__(self, group, cache, coord_system):
         self.group = group
         self.cache = cache
-        self.joint_names = group.get_active_joints()
+        self.coord_system = coord_system
         
-        # 设置更激进的规划参数
-        self.group.set_planning_time(2.0)  # 大幅减少规划时间避免超时
-        self.group.set_planner_id("RRTConnect")  # 使用更快的规划器
-        self.group.set_num_planning_attempts(1)  # 减少尝试次数
-        self.group.set_max_velocity_scaling_factor(0.6)  # 适中速度
-        self.group.set_max_acceleration_scaling_factor(0.6)  # 适中加速度
+        # 优化的规划参数
+        self.group.set_planning_time(2.0)
+        self.group.set_planner_id("RRTConnect")
+        self.group.set_num_planning_attempts(1)
+        self.group.set_max_velocity_scaling_factor(0.6)
+        self.group.set_max_acceleration_scaling_factor(0.6)
         self.group.set_goal_joint_tolerance(0.001)
         self.group.set_goal_position_tolerance(0.001)
         self.group.set_goal_orientation_tolerance(0.001)
@@ -102,12 +248,10 @@ class PTPController:
         self.safe_positions = {
             'home': [0, -0.785, 0, -2.356, 0, 1.571, 0.785],
             'ready': [0, -0.5, 0, -2.0, 0, 1.5, 0.785],
-            'pick_approach': [0, 0.2, 0, -1.8, 0, 2.0, 0.785],
-            'place_approach': [0, -0.3, 0, -2.2, 0, 1.9, 0.785]
         }
-        
+    
     def move_to_joint_position(self, joint_values, wait=True):
-        """直接移动到关节位置（PTP移动）"""
+        """移动到关节位置"""
         try:
             self.group.set_joint_value_target(joint_values)
             success = self.group.go(wait=wait)
@@ -120,20 +264,17 @@ class PTPController:
             return False
     
     def move_to_named_position(self, name, wait=True):
-        """移动到预定义的命名位置"""
-        # 尝试从缓存加载
+        """移动到预定义位置"""
         cached_joints = self.cache.load_joint_values(name)
         if cached_joints:
             return self.move_to_joint_position(cached_joints, wait)
         
-        # 使用预定义位置
         if name in self.safe_positions:
             joints = self.safe_positions[name]
             if self.move_to_joint_position(joints, wait):
                 self.cache.save_joint_values(joints, name)
                 return True
         
-        # 使用MoveIt的命名目标
         try:
             self.group.set_named_target(name)
             success = self.group.go(wait=wait)
@@ -144,49 +285,9 @@ class PTPController:
         except:
             return False
     
-    def compute_ik_joint_position(self, target_pose):
-        """计算目标位姿的逆运动学解（关节位置）"""
-        # 设置目标位姿
-        self.group.set_pose_target(target_pose)
-        
-        # 获取规划（但不执行）
-        plan = self.group.plan()
-        
-        if isinstance(plan, tuple):
-            success, trajectory, _, _ = plan
-            if success and trajectory and trajectory.joint_trajectory.points:
-                # 返回轨迹终点的关节位置
-                final_point = trajectory.joint_trajectory.points[-1]
-                return list(final_point.positions)
-        
-        return None
-    
-    def move_cartesian(self, waypoints, wait=True):
-        """笛卡尔路径规划（用于直线运动）"""
-        try:
-            (plan, fraction) = self.group.compute_cartesian_path(
-                waypoints,
-                0.01,  # eef步长
-                0.0,   # 跳跃阈值
-                avoid_collisions=True  # 添加明确的避碰参数
-            )
-            
-            if fraction > 0.9:  # 如果90%以上的路径可行
-                success = self.group.execute(plan, wait=wait)
-                if wait:
-                    self.group.stop()
-                return success
-            else:
-                print(f"笛卡尔路径规划不完整: {fraction*100:.1f}%")
-                return False
-        except Exception as e:
-            print(f"笛卡尔路径规划失败: {e}")
-            return False
-    
     def move_to_pose_ptp(self, target_pose, wait=True):
-        """通过关节空间移动到目标位姿"""
+        """移动到目标位姿"""
         try:
-            # 直接使用pose target并用go执行
             self.group.set_pose_target(target_pose)
             success = self.group.go(wait=wait)
             if wait:
@@ -198,287 +299,142 @@ class PTPController:
             return False
 
 
-def open_gripper(posture):
-    posture.joint_names = ["panda_finger_joint1", "panda_finger_joint2"]
-    point = JointTrajectoryPoint()
-    point.positions = [0.04, 0.04]
-    point.time_from_start = rospy.Duration(0.5)
-    posture.points = [point]
-
-
-def closed_gripper(posture):
-    posture.joint_names = ["panda_finger_joint1", "panda_finger_joint2"]
-    point = JointTrajectoryPoint()
-    point.positions = [0.01, 0.01]  # 稍微增加抓取力
-    point.time_from_start = rospy.Duration(0.5)
-    posture.points = [point]
-
-
-def add_collision_objects(scene, objects_info):
+def add_collision_objects(scene, coord_system):
     """添加场景物体"""
     rospy.sleep(1)
     
-    # 地面
-    ground_pose = geometry_msgs.msg.PoseStamped()
-    ground_pose.header.frame_id = "panda_link0"
-    ground_pose.pose.position.z = -0.05
-    ground_pose.pose.orientation.w = 1.0
-    scene.add_box("ground", ground_pose, size=(2.0, 2.0, 0.1))
+    # 添加场景物体
+    for name, config in coord_system.scene_objects.items():
+        pose_stamped = coord_system.create_pose_stamped(config['position'])
+        scene.add_box(name, pose_stamped, size=config['size'])
+        print(f"添加 {config['description']}: {config['position']}")
 
-    # 目标桌子 - 调整位置使其更容易到达
-    table_pose = geometry_msgs.msg.PoseStamped()
-    table_pose.header.frame_id = "panda_link0"
-    table_pose.pose.position.x = 0.0
-    table_pose.pose.position.y = 0.5  # 稍微近一点
-    table_pose.pose.position.z = 0.2
-    table_pose.pose.orientation.w = 1.0
-    scene.add_box("target_table", table_pose, size=(0.6, 0.4, 0.4))
-
-    # 添加物体
-    for name, info in objects_info.items():
-        object_pose = geometry_msgs.msg.PoseStamped()
-        object_pose.header.frame_id = "panda_link0"
-        pos = info['ground_pos']
-        object_pose.pose.position.x = pos[0]
-        object_pose.pose.position.y = pos[1]
-        object_pose.pose.position.z = pos[2]
-        object_pose.pose.orientation.w = 1.0
-        scene.add_box(name, object_pose, size=(0.04, 0.04, 0.06))
+    # 添加可移动物体
+    for name, config in coord_system.objects_config.items():
+        pose_stamped = coord_system.create_pose_stamped(config['ground_pos'])
+        scene.add_box(name, pose_stamped, size=config['size'])
+        print(f"添加物体 {name}: {config['ground_pos']}")
 
     rospy.sleep(2)
-    return list(objects_info.keys())
 
 
-def pick_with_ptp(ptp_controller, group, scene, object_name, x, y, z):
-    """使用PTP控制进行抓取（简化版）"""
-    print(f"使用PTP控制抓取 {object_name}...")
-    
-    # 直接使用手动控制方法，跳过内置pick功能
-    
-    # 1. 初始化夹爪（如果需要）
-    try:
-        gripper_group = MoveGroupCommander("panda_hand")
-        gripper_group.set_planning_time(1.0)  # 减少夹爪规划时间
-    except:
-        print("警告: 无法初始化夹爪控制组，尝试继续...")
-        gripper_group = None
-    
-    # 2. 打开夹爪
-    if gripper_group:
-        try:
-            gripper_group.set_named_target("open")
-            gripper_group.go(wait=True)
-        except:
-            print("警告: 无法打开夹爪，尝试继续...")
-    
-    # 3. 移动到接近位置
-    approach_pose = geometry_msgs.msg.Pose()
-    approach_pose.position.x = x
-    approach_pose.position.y = y
-    approach_pose.position.z = z + 0.2  # 接近高度
-    # 修正方向：绕X轴旋转180度，Z轴旋转45度对齐方块
-    quat = tf.quaternion_from_euler(-math.pi, 0, math.pi/4)
-    approach_pose.orientation = geometry_msgs.msg.Quaternion(*quat)
-    
-    if not ptp_controller.move_to_pose_ptp(approach_pose):
-        print(f"无法到达接近位置")
-        return False
-    
-    print("到达接近位置")
-    rospy.sleep(0.3)
-    
-    # 4. 下降到抓取位置（使用更小的步进）
-    grasp_pose = geometry_msgs.msg.Pose()
-    grasp_pose.position.x = x
-    grasp_pose.position.y = y
-    grasp_pose.position.z = z + 0.1  # 降低抓取高度
-    grasp_pose.orientation = approach_pose.orientation
-    
-    if not ptp_controller.move_to_pose_ptp(grasp_pose):
-        print(f"无法到达抓取位置")
-        return False
-    
-    print("到达抓取位置")
-    rospy.sleep(0.3)
-    
-    # 5. 关闭夹爪抓取物体
-    if gripper_group:
-        try:
-            gripper_group.set_named_target("close")
-            gripper_group.go(wait=True)
-        except:
-            # 尝试直接设置关节值
-            try:
-                gripper_group.set_joint_value_target([0.01, 0.01])
-                gripper_group.go(wait=True)
-            except:
-                print("警告: 无法关闭夹爪")
-    
-    rospy.sleep(0.5)  # 等待夹爪稳定
-    
-    # 6. 附着物体到夹爪
-    touch_links = group.get_end_effector_link()
-    scene.attach_box(touch_links, object_name)
-    rospy.sleep(0.3)
-    
-    # 7. 提升物体
-    lift_pose = geometry_msgs.msg.Pose()
-    lift_pose.position.x = x
-    lift_pose.position.y = y
-    lift_pose.position.z = z + 0.25
-    lift_pose.orientation = approach_pose.orientation
-
-    if ptp_controller.move_to_pose_ptp(lift_pose):
-        print(f"✓ 成功抓取并提升 {object_name}")
-        return True
-    else:
-        # 如果提升失败，尝试清理
-        scene.remove_attached_object(touch_links, name=object_name)
-        print(f"✗ 提升 {object_name} 失败")
-        return False
-
-
-def place_with_ptp(ptp_controller, group, scene, object_name, x, y, z):
-    """使用PTP控制进行放置（简化版）"""
-    print(f"使用PTP控制放置 {object_name}...")
-    
-    # 直接使用手动控制方法
-    
-    # 初始化夹爪（如果需要）
+def control_gripper(action="open"):
+    """控制夹爪"""
     try:
         gripper_group = MoveGroupCommander("panda_hand")
         gripper_group.set_planning_time(1.0)
+        
+        if action == "open":
+            gripper_group.set_joint_value_target([0.04, 0.04])
+        else:  # close
+            gripper_group.set_joint_value_target([0.01, 0.01])
+            
+        return gripper_group.go(wait=True)
     except:
-        print("警告: 无法初始化夹爪控制组，尝试继续...")
-        gripper_group = None
+        print(f"警告: 无法{action}夹爪")
+        return False
+
+
+def pick_object(ptp_controller, group, scene, object_name, coord_system):
+    """抓取物体"""
+    config = coord_system.objects_config[object_name]
+    target_pos = config['ground_pos']
     
-    # 1. 移动到放置接近位置
-    place_approach_pose = geometry_msgs.msg.Pose()
-    place_approach_pose.position.x = x
-    place_approach_pose.position.y = y
-    place_approach_pose.position.z = z + 0.15  # 放置接近高度
-    # 使用垂直向下的方向，与抓取保持一致
-    quat = tf.quaternion_from_euler(math.pi, 0, 0)  # 末端执行器垂直向下
-    place_approach_pose.orientation = geometry_msgs.msg.Quaternion(*quat)
+    print(f"抓取 {object_name} 位置: {target_pos}")
     
-    if not ptp_controller.move_to_pose_ptp(place_approach_pose):
-        print(f"无法到达放置接近位置")
-        # 清理附着的物体
-        scene.remove_attached_object(group.get_end_effector_link(), name=object_name)
+    # 验证位置
+    valid, msg = coord_system.validate_position(target_pos)
+    if not valid:
+        print(f"位置验证失败: {msg}")
         return False
     
-    print("到达放置接近位置")
+    # 1. 打开夹爪
+    control_gripper("open")
+    
+    # 2. 移动到接近位置
+    approach_pose = coord_system.get_approach_pose(target_pos)
+    if not ptp_controller.move_to_pose_ptp(approach_pose):
+        print("无法到达接近位置")
+        return False
+    
+    rospy.sleep(0.3)
+    
+    # 3. 移动到抓取位置
+    grasp_pose = coord_system.get_grasp_pose(target_pos)
+    if not ptp_controller.move_to_pose_ptp(grasp_pose):
+        print("无法到达抓取位置")
+        return False
+    
+    rospy.sleep(0.3)
+    
+    # 4. 关闭夹爪
+    control_gripper("close")
+    rospy.sleep(0.5)
+    
+    # 5. 附着物体
+    scene.attach_box(group.get_end_effector_link(), object_name)
+    rospy.sleep(0.3)
+    
+    # 6. 提升
+    retreat_pose = coord_system.get_retreat_pose(target_pos)
+    if ptp_controller.move_to_pose_ptp(retreat_pose):
+        print(f"✓ 成功抓取 {object_name}")
+        return True
+    else:
+        scene.remove_attached_object(group.get_end_effector_link(), name=object_name)
+        print(f"✗ 提升失败")
+        return False
+
+
+def place_object(ptp_controller, group, scene, object_name, coord_system):
+    """放置物体"""
+    config = coord_system.objects_config[object_name]
+    target_pos = config['table_pos']
+    
+    print(f"放置 {object_name} 位置: {target_pos}")
+    
+    # 验证位置
+    valid, msg = coord_system.validate_position(target_pos)
+    if not valid:
+        print(f"位置验证失败: {msg}")
+        return False
+    
+    # 1. 移动到放置接近位置
+    approach_pose = coord_system.get_approach_pose(target_pos)
+    if not ptp_controller.move_to_pose_ptp(approach_pose):
+        print("无法到达放置接近位置")
+        return False
+    
     rospy.sleep(0.3)
     
     # 2. 下降到放置位置
-    place_pose = geometry_msgs.msg.Pose()
-    place_pose.position.x = x
-    place_pose.position.y = y
-    place_pose.position.z = z + 0.13  # 放置高度
-    # 保持与接近位置相同的方向
-    place_pose.orientation = place_approach_pose.orientation  # 保持相同方向
-    
+    place_pose = coord_system.create_pose(target_pos)
     if not ptp_controller.move_to_pose_ptp(place_pose):
-        print(f"无法到达放置位置")
-        scene.remove_attached_object(group.get_end_effector_link(), name=object_name)
+        print("无法到达放置位置")
         return False
     
-    print("到达放置位置")
     rospy.sleep(0.3)
     
-    # 3. 解除物体附着（在打开夹爪前）
-    touch_links = group.get_end_effector_link()
-    scene.remove_attached_object(touch_links, name=object_name)
+    # 3. 解除附着
+    scene.remove_attached_object(group.get_end_effector_link(), name=object_name)
     rospy.sleep(0.3)
     
-    # 4. 打开夹爪释放物体
-    if gripper_group:
-        try:
-            gripper_group.set_named_target("open")
-            gripper_group.go(wait=True)
-        except:
-            try:
-                gripper_group.set_joint_value_target([0.04, 0.04])
-                gripper_group.go(wait=True)
-            except:
-                print("警告: 无法打开夹爪")
+    # 4. 打开夹爪
+    control_gripper("open")
+    rospy.sleep(0.5)
     
-    rospy.sleep(0.5)  # 等待物体稳定
-    
-    # 5. 提升夹爪撤退
-    retreat_pose = geometry_msgs.msg.Pose()
-    retreat_pose.position.x = x
-    retreat_pose.position.y = y
-    retreat_pose.position.z = z + 0.25  # 撤退高度
-    retreat_pose.orientation = place_approach_pose.orientation  # 保持相同方向
-    
+    # 5. 撤退
+    retreat_pose = coord_system.get_retreat_pose(target_pos)
     if ptp_controller.move_to_pose_ptp(retreat_pose):
         print(f"✓ 成功放置 {object_name}")
         return True
     else:
-        # 即使撤退失败，物体已经放置
-        print(f"✓ 放置 {object_name} 成功（撤退时有警告）")
+        print(f"✓ 放置成功（撤退有警告）")
         return True
 
 
-def move_objects_with_ptp(ptp_controller, group, scene, objects_info):
-    """使用PTP控制搬运物体"""
-    successful_moves = 0
-    
-    # 按距离排序物体（从近到远）
-    sorted_objects = sorted(
-        objects_info.keys(),
-        key=lambda name: math.sqrt(
-            objects_info[name]['ground_pos'][0]**2 + 
-            objects_info[name]['ground_pos'][1]**2
-        )
-    )
-
-    for i, object_name in enumerate(sorted_objects):
-        info = objects_info[object_name]
-        ground_pos = info['ground_pos']
-        table_pos = info['table_pos']
-        
-        print("\n" + "="*30)
-        print(f"处理物体: {object_name} ({i+1}/{len(sorted_objects)})")
-        print("="*30)
-        
-        # 移动到准备位置
-        if i == 0 or successful_moves % 2 == 0:
-            print("移动到ready位置...")
-            ptp_controller.move_to_named_position('ready')
-            rospy.sleep(0.5)
-        
-        # 抓取
-        if pick_with_ptp(ptp_controller, group, scene, object_name, 
-                        ground_pos[0], ground_pos[1], ground_pos[2]):
-            
-            # 提升到安全高度
-            ptp_controller.move_to_named_position('place_approach')
-            rospy.sleep(0.3)
-            
-            # 放置
-            if place_with_ptp(ptp_controller, group, scene, object_name,
-                            table_pos[0], table_pos[1], table_pos[2]):
-                successful_moves += 1
-                print(f"✓ {object_name} 搬运成功")
-            else:
-                print(f"✗ {object_name} 放置失败")
-                # 清理附着的物体
-                scene.remove_attached_object(group.get_end_effector_link(), name=object_name)
-        else:
-            print(f"✗ {object_name} 抓取失败")
-            scene.remove_world_object(object_name)
-        
-        rospy.sleep(0.5)
-
-    return successful_moves
-
-
 def main():
-    print("\n" + "="*50)
-    print("Panda机器人PTP控制多物体搬运系统")
-    print("="*50 + "\n")
+    print("\nPanda机器人PTP控制多物体搬运系统\n")
     
     # 初始化ROS和MoveIt
     moveit_commander.roscpp_initialize(sys.argv)
@@ -487,31 +443,26 @@ def main():
     scene = PlanningSceneInterface()
     group = MoveGroupCommander("panda_arm")
     
-    # 创建缓存和PTP控制器
+    # 创建坐标系统和控制器
+    coord_system = CoordinateSystem()
     cache = JointTrajectoryCache()
-    ptp_controller = PTPController(group, cache)
+    ptp_controller = PTPController(group, cache, coord_system)
     
-    # 优化后的物体位置（更合理的工作空间布局）
-    objects_info = {
-        "object_0_0": {"ground_pos": [0.45, -0.15, 0.025], "table_pos": [-0.08, 0.48, 0.40]},  # 调整桌面高度
-        "object_0_1": {"ground_pos": [0.45, -0.05, 0.025], "table_pos": [-0.08, 0.60, 0.40]},
-        "object_1_0": {"ground_pos": [0.55, -0.15, 0.025], "table_pos": [0.04, 0.48, 0.40]},
-        "object_1_1": {"ground_pos": [0.55, -0.05, 0.025], "table_pos": [0.04, 0.60, 0.40]},
-    }
+    # 打印坐标系统信息
+    coord_system.print_coordinates_info()
     
     # 设置场景
     print("初始化场景...")
     scene.clear()
     rospy.sleep(1)
     
-    # 清理可能的附着物体
+    # 清理附着物体
     attached_objects = scene.get_attached_objects()
     for obj in attached_objects.keys():
         scene.remove_attached_object(group.get_end_effector_link(), name=obj)
         rospy.sleep(0.3)
     
-    # 添加场景物体
-    add_collision_objects(scene, objects_info)
+    add_collision_objects(scene, coord_system)
     
     # 移动到初始位置
     print("移动到初始位置...")
@@ -521,8 +472,26 @@ def main():
     # 开始搬运
     print("\n开始搬运作业...\n")
     start_time = time.time()
+    successful_count = 0
     
-    successful_count = move_objects_with_ptp(ptp_controller, group, scene, objects_info)
+    object_names = list(coord_system.objects_config.keys())
+    
+    for i, object_name in enumerate(object_names):
+        print(f"\n处理物体: {object_name} ({i+1}/{len(object_names)})")
+        
+        # 移动到准备位置
+        ptp_controller.move_to_named_position('ready')
+        rospy.sleep(0.5)
+        
+        # 抓取和放置
+        if pick_object(ptp_controller, group, scene, object_name, coord_system):
+            if place_object(ptp_controller, group, scene, object_name, coord_system):
+                successful_count += 1
+            else:
+                # 清理失败的附着物体
+                scene.remove_attached_object(group.get_end_effector_link(), name=object_name)
+        
+        rospy.sleep(0.5)
     
     elapsed_time = time.time() - start_time
     
@@ -530,19 +499,11 @@ def main():
     print("\n返回home位置...")
     ptp_controller.move_to_named_position('home')
     
-    # 打印统计信息
-    print("\n" + "="*50)
-    print("搬运作业完成！")
-    print(f"成功率: {successful_count}/{len(objects_info)} ({successful_count*100/len(objects_info):.1f}%)")
+    # 打印结果
+    print(f"\n搬运完成！成功率: {successful_count}/{len(object_names)} ({successful_count*100/len(object_names):.1f}%)")
     print(f"总用时: {elapsed_time:.1f} 秒")
-    print(f"平均每个物体: {elapsed_time/len(objects_info):.1f} 秒")
     
-    # 缓存统计
-    cache_files = [f for f in os.listdir(cache.cache_dir) if f.endswith('.pkl')]
-    print(f"\n缓存的关节位置: {len(cache_files)} 个")
-    print("="*50)
-    
-    rospy.sleep(5)
+    rospy.sleep(2)
     moveit_commander.roscpp_shutdown()
 
 
@@ -552,6 +513,4 @@ if __name__ == "__main__":
     except rospy.ROSInterruptException:
         print("\n程序被中断")
     except Exception as e:
-        import traceback
         print(f"\n程序错误: {e}")
-        traceback.print_exc()

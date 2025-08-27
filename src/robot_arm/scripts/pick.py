@@ -16,32 +16,26 @@ import rospkg
 import numpy as np
 
 class CoordinateSystem:
-    """统一的坐标系管理类（新增参数化网格生成，恢复原始布局坐标）"""
-    def __init__(self, base_frame="panda_link0",
-                 rows=2, cols=2,
-                 ground_origin=(0.45, -0.15, 0.025), ground_dx=0.10, ground_dy=0.10,
-                 table_origin=(-0.08, 0.48), table_dx=0.12, table_dy=0.12,
-                 object_size=(0.04, 0.04, 0.06),
-                 place_z_mode='legacy'  # 'legacy' -> 0.40 兼容旧代码, 'flush' -> 桌面+物体半高 0.43
-                 ):
+    """统一的坐标系管理类（使用原始脚本的正确坐标）"""
+    def __init__(self, base_frame="panda_link0"):
         self.base_frame = base_frame
-        # 工作空间
+        # 工作空间 - 扩展X范围以包含桌面放置位置
         self.workspace = {
-            'x_range': [0.2, 0.8],
+            'x_range': [-0.2, 0.8],  # 扩展到-0.2以包含-0.08的桌面位置
             'y_range': [-0.6, 0.6],
-            'z_range': [0.0, 0.5],
+            'z_range': [0.0, 0.6],   # 稍微增加Z范围
         }
         # 关键高度
         self.key_positions = {
-            'ground_level': ground_origin[2],
+            'ground_level': 0.025,
             'table_surface': 0.4,
             'approach_offset': 0.15,
             'safe_height': 0.3,
         }
-        # 场景固定物体
+        # 场景固定物体（使用原始脚本的正确坐标）
         self.scene_objects = {
             'table': {
-                'position': [0.0, 0.5, 0.2],
+                'position': [0.0, 0.5, 0.2],  # 原始桌子位置
                 'size': [0.6, 0.4, 0.4],
                 'description': '目标桌子'
             },
@@ -51,60 +45,25 @@ class CoordinateSystem:
                 'description': '地面'
             }
         }
-        # 网格/物体参数
-        self.rows = rows
-        self.cols = cols
-        self.ground_origin = ground_origin
-        self.ground_dx = ground_dx
-        self.ground_dy = ground_dy
-        self.table_origin = table_origin
-        self.table_dx = table_dx
-        self.table_dy = table_dy
-        self.object_size = object_size
-        self.place_z_mode = place_z_mode  # legacy / flush
-
-        # 根据模式计算桌面放置中心Z
-        if place_z_mode == 'flush':
-            # 桌面表面 + 物体半高 = 0.4 + 0.03 = 0.43
-            self.table_center_z = self.key_positions['table_surface'] + self.object_size[2] / 2.0
-        else:
-            # 旧代码使用的中心高度（兼容）
-            self.table_center_z = self.key_positions['table_surface']
-
-        # 构建 objects_config
-        self.rebuild_objects_config()
-
-    def rebuild_objects_config(self):
-        """根据参数化网格重建 objects_config"""
-        objs = {}
-        for r in range(self.rows):
-            for c in range(self.cols):
-                name = f"object_{r}_{c}"
-                # 地面位置
-                gx = self.ground_origin[0] + c * self.ground_dx
-                gy = self.ground_origin[1] + r * self.ground_dy
-                gz = self.ground_origin[2]
-                # 桌面放置位置（中心）
-                tx = self.table_origin[0] + c * self.table_dx
-                ty = self.table_origin[1] + r * self.table_dy
-                tz = self.table_center_z
-                objs[name] = {
-                    "ground_pos": [round(gx, 4), round(gy, 4), round(gz, 4)],
-                    "table_pos": [round(tx, 4), round(ty, 4), round(tz, 4)],
-                    "size": list(self.object_size)
-                }
-        self.objects_config = objs
+        
+        # 使用原始脚本的精确坐标配置
+        self.objects_config = {
+            "object_0_0": {"ground_pos": [0.45, -0.15, 0.025], "table_pos": [-0.08, 0.48, 0.40], "size": [0.04, 0.04, 0.06]},
+            "object_0_1": {"ground_pos": [0.45, -0.05, 0.025], "table_pos": [-0.08, 0.60, 0.40], "size": [0.04, 0.04, 0.06]},
+            "object_1_0": {"ground_pos": [0.55, -0.15, 0.025], "table_pos": [0.04, 0.48, 0.40], "size": [0.04, 0.04, 0.06]},
+            "object_1_1": {"ground_pos": [0.55, -0.05, 0.025], "table_pos": [0.04, 0.60, 0.40], "size": [0.04, 0.04, 0.06]},
+        }
 
     def create_pose(self, position, orientation=None):
-        """创建标准的Pose消息"""
+        """创建标准的Pose消息（修复方向，去除45度旋转）"""
         pose = geometry_msgs.msg.Pose()
         pose.position.x = position[0]
         pose.position.y = position[1] 
         pose.position.z = position[2]
         
         if orientation is None:
-            # 默认：末端执行器垂直向下，Z轴旋转45度
-            quat = tf.quaternion_from_euler(math.pi, 0, math.pi/4)
+            # 使用原始脚本的正确方向：绕X轴旋转180度（垂直向下），无Z轴旋转
+            quat = tf.quaternion_from_euler(math.pi, 0, 0)  # 移除math.pi/4旋转
         else:
             quat = orientation
             
@@ -160,16 +119,14 @@ class CoordinateSystem:
         return True, "位置有效"
     
     def print_coordinates_info(self):
-        """打印坐标系统信息（补充网格公式与模式说明）"""
+        """打印坐标系统信息（更新为原始坐标）"""
         print("\n" + "="*50)
-        print("坐标系统信息")
+        print("坐标系统信息（使用原始脚本坐标）")
         print("="*50)
         print(f"基座坐标系: {self.base_frame}")
         print(f"工作空间: X{self.workspace['x_range']} Y{self.workspace['y_range']} Z{self.workspace['z_range']}")
-        print(f"物体尺寸: {self.object_size}")
-        print(f"地面网格: origin{self.ground_origin[:2]} dx={self.ground_dx} dy={self.ground_dy} rows={self.rows} cols={self.cols}")
-        print(f"桌面网格: origin{self.table_origin} dx={self.table_dx} dy={self.table_dy} rows={self.rows} cols={self.cols}")
-        print(f"放置Z模式: {self.place_z_mode} (table_center_z={self.table_center_z})")
+        print(f"桌子位置: {self.scene_objects['table']['position']}")
+        print(f"桌子尺寸: {self.scene_objects['table']['size']}")
         print("\n物体配置 (ground -> table):")
         for name, cfg in self.objects_config.items():
             print(f"  {name}: {cfg['ground_pos']} -> {cfg['table_pos']}")
@@ -300,19 +257,37 @@ class PTPController:
 
 
 def add_collision_objects(scene, coord_system):
-    """添加场景物体"""
+    """添加场景物体（使用原始脚本的正确配置）"""
     rospy.sleep(1)
     
-    # 添加场景物体
-    for name, config in coord_system.scene_objects.items():
-        pose_stamped = coord_system.create_pose_stamped(config['position'])
-        scene.add_box(name, pose_stamped, size=config['size'])
-        print(f"添加 {config['description']}: {config['position']}")
+    # 地面
+    ground_pose = geometry_msgs.msg.PoseStamped()
+    ground_pose.header.frame_id = "panda_link0"
+    ground_pose.pose.position.z = -0.05
+    ground_pose.pose.orientation.w = 1.0
+    scene.add_box("ground", ground_pose, size=(2.0, 2.0, 0.1))
+    print("添加地面: [0.0, 0.0, -0.05]")
+
+    # 目标桌子 - 使用原始位置
+    table_pose = geometry_msgs.msg.PoseStamped()
+    table_pose.header.frame_id = "panda_link0"
+    table_pose.pose.position.x = 0.0
+    table_pose.pose.position.y = 0.5
+    table_pose.pose.position.z = 0.2
+    table_pose.pose.orientation.w = 1.0
+    scene.add_box("target_table", table_pose, size=(0.6, 0.4, 0.4))
+    print("添加目标桌子: [0.0, 0.5, 0.2]")
 
     # 添加可移动物体
     for name, config in coord_system.objects_config.items():
-        pose_stamped = coord_system.create_pose_stamped(config['ground_pos'])
-        scene.add_box(name, pose_stamped, size=config['size'])
+        object_pose = geometry_msgs.msg.PoseStamped()
+        object_pose.header.frame_id = "panda_link0"
+        pos = config['ground_pos']
+        object_pose.pose.position.x = pos[0]
+        object_pose.pose.position.y = pos[1]
+        object_pose.pose.position.z = pos[2]
+        object_pose.pose.orientation.w = 1.0
+        scene.add_box(name, object_pose, size=config['size'])
         print(f"添加物体 {name}: {config['ground_pos']}")
 
     rospy.sleep(2)
@@ -336,7 +311,7 @@ def control_gripper(action="open"):
 
 
 def pick_object(ptp_controller, group, scene, object_name, coord_system):
-    """抓取物体"""
+    """抓取物体（使用原始脚本的正确方向）"""
     config = coord_system.objects_config[object_name]
     target_pos = config['ground_pos']
     
@@ -387,7 +362,7 @@ def pick_object(ptp_controller, group, scene, object_name, coord_system):
 
 
 def place_object(ptp_controller, group, scene, object_name, coord_system):
-    """放置物体"""
+    """放置物体（使用原始脚本的正确坐标和方向）"""
     config = coord_system.objects_config[object_name]
     target_pos = config['table_pos']
     
@@ -407,8 +382,9 @@ def place_object(ptp_controller, group, scene, object_name, coord_system):
     
     rospy.sleep(0.3)
     
-    # 2. 下降到放置位置
-    place_pose = coord_system.create_pose(target_pos)
+    # 2. 下降到放置位置（调整为桌面上方合适高度）
+    place_pos = [target_pos[0], target_pos[1], target_pos[2] + 0.13]  # 使用原始脚本的放置高度
+    place_pose = coord_system.create_pose(place_pos)
     if not ptp_controller.move_to_pose_ptp(place_pose):
         print("无法到达放置位置")
         return False

@@ -327,7 +327,7 @@ def pick_with_ptp(ptp_controller, group, scene, object_name, x, y, z):
     lift_pose.position.y = y
     lift_pose.position.z = z + 0.25
     lift_pose.orientation = approach_pose.orientation
-    
+
     if ptp_controller.move_to_pose_ptp(lift_pose):
         print(f"✓ 成功抓取并提升 {object_name}")
         return True
@@ -356,9 +356,10 @@ def place_with_ptp(ptp_controller, group, scene, object_name, x, y, z):
     place_approach_pose = geometry_msgs.msg.Pose()
     place_approach_pose.position.x = x
     place_approach_pose.position.y = y
-    place_approach_pose.position.z = z + 0.2
-    # 使用垂直方向放置
-    # place_approach_pose.orientation.w = 1.0
+    place_approach_pose.position.z = z + 0.15  # 放置接近高度
+    # 使用垂直向下的方向，与抓取保持一致
+    quat = tf.quaternion_from_euler(math.pi, 0, 0)  # 末端执行器垂直向下
+    place_approach_pose.orientation = geometry_msgs.msg.Quaternion(*quat)
     
     if not ptp_controller.move_to_pose_ptp(place_approach_pose):
         print(f"无法到达放置接近位置")
@@ -373,8 +374,9 @@ def place_with_ptp(ptp_controller, group, scene, object_name, x, y, z):
     place_pose = geometry_msgs.msg.Pose()
     place_pose.position.x = x
     place_pose.position.y = y
-    place_pose.position.z = z + 0.06  # 降低放置高度
-    # place_pose.orientation.w = 1.0
+    place_pose.position.z = z + 0.13  # 放置高度
+    # 保持与接近位置相同的方向
+    place_pose.orientation = place_approach_pose.orientation  # 保持相同方向
     
     if not ptp_controller.move_to_pose_ptp(place_pose):
         print(f"无法到达放置位置")
@@ -407,8 +409,8 @@ def place_with_ptp(ptp_controller, group, scene, object_name, x, y, z):
     retreat_pose = geometry_msgs.msg.Pose()
     retreat_pose.position.x = x
     retreat_pose.position.y = y
-    retreat_pose.position.z = z + 0.25
-    retreat_pose.orientation.w = 1.0
+    retreat_pose.position.z = z + 0.25  # 撤退高度
+    retreat_pose.orientation = place_approach_pose.orientation  # 保持相同方向
     
     if ptp_controller.move_to_pose_ptp(retreat_pose):
         print(f"✓ 成功放置 {object_name}")
@@ -491,10 +493,10 @@ def main():
     
     # 优化后的物体位置（更合理的工作空间布局）
     objects_info = {
-        "object_0_0": {"ground_pos": [0.45, -0.15, 0.025], "table_pos": [-0.08, 0.48, 0.425]},
-        "object_0_1": {"ground_pos": [0.45, -0.05, 0.025], "table_pos": [-0.08, 0.60, 0.425]},
-        "object_1_0": {"ground_pos": [0.55, -0.15, 0.025], "table_pos": [0.04, 0.48, 0.425]},
-        "object_1_1": {"ground_pos": [0.55, -0.05, 0.025], "table_pos": [0.04, 0.60, 0.425]},
+        "object_0_0": {"ground_pos": [0.45, -0.15, 0.025], "table_pos": [-0.08, 0.48, 0.40]},  # 调整桌面高度
+        "object_0_1": {"ground_pos": [0.45, -0.05, 0.025], "table_pos": [-0.08, 0.60, 0.40]},
+        "object_1_0": {"ground_pos": [0.55, -0.15, 0.025], "table_pos": [0.04, 0.48, 0.40]},
+        "object_1_1": {"ground_pos": [0.55, -0.05, 0.025], "table_pos": [0.04, 0.60, 0.40]},
     }
     
     # 设置场景
